@@ -14,6 +14,7 @@ class PotreePointCloudReaderBase(ABC):
         "uint16": np.uint16,
         "uint32": np.uint32,
         "int16": np.int16,
+        "float": np.float32,
         "double": np.float64
     }
 

@@ -23,9 +23,7 @@ ATTRIBUTES_KEY = "attributes"
 ATTRIBUTE_NAME_KEY = "name"
 ATTRIBUTE_TYPE_KEY = "type"
 ATTRIBUTE_SIZE_KEY = "size"
-ATTRIBUTE_MIN_KEY = "min"
 
 # Potree metadata attributes types
 POSITION_ATTRIBUTE = "position"
-RGB_ATTRIBUTE = "rgb"
-CUSTOM_ID_ATTRIBUTE = "customId"
+RGBA_ATTRIBUTE = "rgba"

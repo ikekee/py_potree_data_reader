@@ -10,14 +10,12 @@ import brotli
 import numpy as np
 
 from components.common.files_lib import open_json
-from components.point_cloud_reader.constants import ATTRIBUTE_MIN_KEY
 from components.point_cloud_reader.constants import ATTRIBUTE_NAME_KEY
 from components.point_cloud_reader.constants import ATTRIBUTE_SIZE_KEY
 from components.point_cloud_reader.constants import ATTRIBUTE_TYPE_KEY
 from components.point_cloud_reader.constants import ATTRIBUTES_KEY
 from components.point_cloud_reader.constants import BYTES_FOR_RGB
 from components.point_cloud_reader.constants import BYTES_PER_NODE
-from components.point_cloud_reader.constants import CUSTOM_ID_ATTRIBUTE
 from components.point_cloud_reader.constants import ENCODING_KEY
 from components.point_cloud_reader.constants import HIERARCHY_BINARY_FILENAME
 from components.point_cloud_reader.constants import METADATA_FILENAME
@@ -29,7 +27,7 @@ from components.point_cloud_reader.constants import OFFSET_KEY
 from components.point_cloud_reader.constants import POINTS_KEY
 from components.point_cloud_reader.constants import POSITION_ATTRIBUTE
 from components.point_cloud_reader.constants import POTREE_PROXY_NODE_TYPE
-from components.point_cloud_reader.constants import RGB_ATTRIBUTE
+from components.point_cloud_reader.constants import RGBA_ATTRIBUTE
 from components.point_cloud_reader.constants import SCALE_KEY
 from components.point_cloud_reader.constants import VERSION_KEY
 from components.point_cloud_reader.point_cloud_reader_base import PotreePointCloudReaderBase
@@ -84,7 +82,7 @@ def read_node_positions_data(morton_code_bytes: bytes, num_points: int) -> Optio
     return np.column_stack((x, y, z))
 
 
-def read_node_rgb_data(morton_code_bytes: bytes, num_points: int) -> Optional[np.ndarray]:
+def read_node_rgba_data(morton_code_bytes: bytes, num_points: int) -> Optional[np.ndarray]:
     """Reads points RGB data from octree node.
 
     Args:
@@ -129,7 +127,7 @@ def parse_potree_hierarchy(hierarchy_bytes: bytes) -> List[List[int]]:
         # and nodes with zero bytes size (check line 196) in link above
         if node_type != POTREE_PROXY_NODE_TYPE and byte_size != 0:
             data_to_read.append([num_points, byte_offset, byte_size])
-    return data_to_read
+    return np.unique(data_to_read, axis=0)
 
 
 class PotreeBrotliCompressedPointCloudReader(PotreePointCloudReaderBase):
@@ -174,6 +172,18 @@ class PotreeBrotliCompressedPointCloudReader(PotreePointCloudReaderBase):
             A numpy array with points from all nodes in the octree.
         """
         data = defaultdict(lambda: np.zeros(self._metadata[POINTS_KEY]))
+        for attribute_metadata in self._metadata[ATTRIBUTES_KEY]:
+            if attribute_metadata[ATTRIBUTE_NAME_KEY] == POSITION_ATTRIBUTE:
+                data[POSITION_ATTRIBUTE] = np.zeros((self._metadata[POINTS_KEY], 3),
+                                                    dtype=np.float32)
+            elif attribute_metadata[ATTRIBUTE_NAME_KEY] == RGBA_ATTRIBUTE:
+                data[RGBA_ATTRIBUTE] = np.zeros((self._metadata[POINTS_KEY], 3),
+                                                dtype=np.float32)
+            else:
+                numpy_dtype = self.TYPES_MAPPING[attribute_metadata[ATTRIBUTE_TYPE_KEY]]
+                dt = np.dtype(numpy_dtype).newbyteorder('<')
+                data[attribute_metadata[ATTRIBUTE_NAME_KEY]] = np.zeros(self._metadata[POINTS_KEY],
+                                                                        dtype=dt)
         current_index = 0
         for num_points, byte_offset, byte_size in data_to_read:
             brotli_compressed_node_bytes = octree_bytes[byte_offset: byte_offset + byte_size]
@@ -182,26 +192,29 @@ class PotreeBrotliCompressedPointCloudReader(PotreePointCloudReaderBase):
             for attribute_metadata in self._metadata[ATTRIBUTES_KEY]:
                 if attribute_metadata[ATTRIBUTE_NAME_KEY] == POSITION_ATTRIBUTE:
                     positions = read_node_positions_data(node_bytes, num_points)
+                    positions = positions * self._scale + self._offset
                     read_bytes_num = num_points * MIN_BYTES_FOR_MORTON_CODE
                     data[POSITION_ATTRIBUTE][current_index: current_index + num_points] = positions
-                elif attribute_metadata[ATTRIBUTE_NAME_KEY] == RGB_ATTRIBUTE:
-                    colors = read_node_rgb_data(node_bytes, num_points)
+                elif attribute_metadata[ATTRIBUTE_NAME_KEY] == RGBA_ATTRIBUTE:
+                    colors = read_node_rgba_data(node_bytes, num_points)
                     read_bytes_num = num_points * BYTES_FOR_RGB
-                    data[RGB_ATTRIBUTE][current_index: current_index + num_points] = colors
+                    data[RGBA_ATTRIBUTE][current_index: current_index + num_points] = colors
                 else:
                     attribute_name = attribute_metadata[ATTRIBUTE_NAME_KEY]
-                    numpy_dtype = self.TYPES_MAPPING[attribute_name]
+                    numpy_dtype = self.TYPES_MAPPING[attribute_metadata[ATTRIBUTE_TYPE_KEY]]
                     dt = np.dtype(numpy_dtype).newbyteorder('<')
                     read_bytes_num = attribute_metadata[ATTRIBUTE_SIZE_KEY] * num_points
                     bytes_to_read = node_bytes[
                                     attributes_byte_offset: attributes_byte_offset + read_bytes_num]
-                    attribute_data = np.frombuffer(bytes_to_read, dtype=dt)
+                    attribute_data = np.frombuffer(bytes_to_read, dtype=dt, count=num_points)
+                    if data[attribute_name].dtype != attribute_data.dtype:
+                        print(data[attribute_name].dtype, attribute_data.dtype)
                     data[attribute_name][current_index: current_index + num_points] = attribute_data
                 attributes_byte_offset += read_bytes_num
-                current_index += num_points
+            current_index += num_points
         return data
 
-    def read_point_cloud(self, path: Path) -> np.ndarray:
+    def read_point_cloud(self, path: Path) -> Dict[str, np.ndarray]:
         """Reads the point cloud from the given path.
 
         Args:
@@ -213,6 +226,8 @@ class PotreeBrotliCompressedPointCloudReader(PotreePointCloudReaderBase):
         self._metadata = open_json(path / METADATA_FILENAME)
         self._check_potree_format_version()
         self._check_potree_data_encoding()
+        self._scale = np.array(self._metadata[SCALE_KEY], dtype=np.float32)
+        self._offset = np.array(self._metadata[OFFSET_KEY], dtype=np.float64)
 
         with open(path / HIERARCHY_BINARY_FILENAME, "rb") as hierarchy_file:
             hierarchy_bytes = hierarchy_file.read()
@@ -222,11 +237,6 @@ class PotreeBrotliCompressedPointCloudReader(PotreePointCloudReaderBase):
 
         data_to_read = parse_potree_hierarchy(hierarchy_bytes)
 
-        points = self._read_potree_octree(data_to_read, octree_bytes)
-        if len(points) != self._metadata[POINTS_KEY]:
-            raise ValueError(
-                f"Points number mismatch: {len(points)} vs {self._metadata[POINTS_KEY]}")
+        point_cloud_data = self._read_potree_octree(data_to_read, octree_bytes)
 
-        scale = np.array(self._metadata[SCALE_KEY], dtype=np.float32)
-        offset = np.array(self._metadata[OFFSET_KEY], dtype=np.float64)
-        return points * scale + offset
+        return point_cloud_data
