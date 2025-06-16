@@ -17,3 +17,13 @@ def open_json(file_path: Path) -> Dict[Any, Any]:
     with open(file_path, 'r') as f:
         data = json.load(f)
     return data
+
+
+def create_path_if_not_exists(path: Path) -> None:
+    """Creates a path (folders and subfolders) if it doesn't exist.
+
+    Args:
+        path: A path to the folder.
+    """
+    if not path.exists():
+        path.mkdir(parents=True)
